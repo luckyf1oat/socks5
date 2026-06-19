@@ -385,45 +385,97 @@ config_firewall() {
 start_service() {
     log_info "启动 Dante 服务..."
     
-    # Stop any existing instance first
-    if command -v systemctl &>/dev/null && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    # Determine the sockd binary path
+    local SOCKD_BIN=""
+    if command -v sockd &>/dev/null; then
+        SOCKD_BIN="sockd"
+    elif command -v danted &>/dev/null; then
+        SOCKD_BIN="danted"
+    else
+        log_error "找不到 sockd 或 danted 二进制文件"
+        exit 1
     fi
     
-    if command -v rc-service &>/dev/null && rc-service "$SERVICE_NAME" status 2>/dev/null | grep -q "started"; then
+    # Kill any existing instances cleanly
+    pkill -9 sockd 2>/dev/null || true
+    pkill -9 danted 2>/dev/null || true
+    sleep 1
+    
+    # Stop systemd service if it exists
+    if command -v systemctl &>/dev/null; then
+        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+        systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    fi
+    
+    # Stop OpenRC service if it exists
+    if command -v rc-service &>/dev/null; then
         rc-service "$SERVICE_NAME" stop 2>/dev/null || true
     fi
+    if command -v rc-update &>/dev/null; then
+        rc-update del "$SERVICE_NAME" 2>/dev/null || true
+    fi
     
-    # Enable and start (systemd)
+    # Create systemd service file with proper -p flag for password auth
     if command -v systemctl &>/dev/null; then
-        systemctl enable "$SERVICE_NAME" 2>/dev/null || true
-        systemctl restart "$SERVICE_NAME" 2>/dev/null || {
-            # If service fail, try direct start
-            log_warn "systemctl 启动失败，尝试直接启动..."
-            sockd -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
-            sleep 2
-        }
-        if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        mkdir -p /etc/systemd/system
+        cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
+[Unit]
+Description=Dante SOCKS5 Proxy
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=${SOCKD_BIN} -f ${CONFIG_FILE} -p ${PASSWD_FILE}
+PIDFile=/var/run/sockd.pid
+Restart=always
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable "$SERVICE_NAME"
+        systemctl start "$SERVICE_NAME"
+        
+        sleep 2
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
             echo -e "  状态: ${GREEN}运行中 (systemd)${NC}"
         else
+            log_warn "systemd 启动失败，尝试直接启动..."
+            $SOCKD_BIN -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
+            sleep 2
             echo -e "  状态: ${YELLOW}已手动启动${NC}"
         fi
     # OpenRC (Alpine)
     elif command -v rc-update &>/dev/null; then
-        rc-update add "$SERVICE_NAME" default 2>/dev/null || true
-        rc-service "$SERVICE_NAME" restart 2>/dev/null || {
-            log_warn "rc-service 启动失败，尝试直接启动..."
-            sockd -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
-            sleep 2
-        }
+        # Create OpenRC init script
+        cat > /etc/init.d/${SERVICE_NAME} << EOF
+#!/sbin/openrc-run
+name="Dante SOCKS5 Proxy"
+command="${SOCKD_BIN}"
+command_args="-f ${CONFIG_FILE} -p ${PASSWD_FILE} -D"
+command_background=true
+pidfile="/var/run/${SERVICE_NAME}.pid"
+depend() {
+    need net
+}
+EOF
+        chmod +x /etc/init.d/${SERVICE_NAME}
+        rc-update add "$SERVICE_NAME" default
+        rc-service "$SERVICE_NAME" start
+        
+        sleep 2
         if rc-service "$SERVICE_NAME" status 2>/dev/null | grep -q "started"; then
             echo -e "  状态: ${GREEN}运行中 (OpenRC)${NC}"
         else
+            log_warn "OpenRC 启动失败，尝试直接启动..."
+            $SOCKD_BIN -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
+            sleep 2
             echo -e "  状态: ${YELLOW}已手动启动${NC}"
         fi
     else
         # Direct start
-        sockd -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
+        $SOCKD_BIN -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
         sleep 2
         echo -e "  状态: ${YELLOW}已直接启动${NC}"
     fi
@@ -434,6 +486,7 @@ start_service() {
         echo -e "  端口: ${GREEN}$SOCKS_PORT 正在监听${NC}"
     else
         log_warn "端口 $SOCKS_PORT 未检测到监听，请检查 Dante 日志"
+        log_info "排查命令: journalctl -u ${SERVICE_NAME} --no-pager -n 20"
     fi
 }
 
