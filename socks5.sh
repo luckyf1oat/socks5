@@ -52,8 +52,9 @@ log_error() {
 }
 
 # Generate random string: 6 chars (A-Z, a-z, 0-9, symbols)
+# Excludes @ : / ? # [ ] characters that break URLs
 gen_random_6() {
-    local chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*_'
+    local chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!$%^&*_-+='
     local result=""
     local len=${#chars}
     # Use /dev/urandom with a deterministic approach that works across all Linux
@@ -65,6 +66,22 @@ gen_random_6() {
         result="${result}${chars:idx:1}"
     done
     echo "$result"
+}
+
+# URL-encode a string (RFC 3986)
+url_encode() {
+    local str="$1"
+    local encoded=""
+    local char
+    local len=${#str}
+    for ((i=0; i<len; i++)); do
+        char="${str:i:1}"
+        case "$char" in
+            [a-zA-Z0-9.~_-]) encoded+="$char" ;;
+            *) encoded+=$(printf '%%%02X' "'$char") ;;
+        esac
+    done
+    echo "$encoded"
 }
 
 # ==================== OS Detection ==========================
