@@ -68,22 +68,6 @@ gen_random_6() {
     echo "$result"
 }
 
-# URL-encode a string (RFC 3986)
-url_encode() {
-    local str="$1"
-    local encoded=""
-    local char
-    local len=${#str}
-    for ((i=0; i<len; i++)); do
-        char="${str:i:1}"
-        case "$char" in
-            [a-zA-Z0-9.~_-]) encoded+="$char" ;;
-            *) encoded+=$(printf '%%%02X' "'$char") ;;
-        esac
-    done
-    echo "$encoded"
-}
-
 # ==================== OS Detection ==========================
 
 detect_os() {
@@ -144,6 +128,43 @@ detect_os() {
     echo -e "  包管理器: ${CYAN}$PKG_MGR${NC}"
     echo -e "  服务名称: ${CYAN}$SERVICE_NAME${NC}"
     echo -e "  配置文件: ${CYAN}$CONFIG_FILE${NC}"
+}
+
+# ==================== Cleanup Old Config =====================
+
+cleanup_old() {
+    log_info "清理旧脚本残留..."
+
+    # Stop and disable service (systemd)
+    if command -v systemctl &>/dev/null; then
+        systemctl stop danted 2>/dev/null || true
+        systemctl stop sockd 2>/dev/null || true
+        systemctl disable danted 2>/dev/null || true
+        systemctl disable sockd 2>/dev/null || true
+    fi
+
+    # Stop service (OpenRC)
+    if command -v rc-service &>/dev/null; then
+        rc-service sockd stop 2>/dev/null || true
+        rc-service danted stop 2>/dev/null || true
+    fi
+    if command -v rc-update &>/dev/null; then
+        rc-update del sockd 2>/dev/null || true
+        rc-update del danted 2>/dev/null || true
+    fi
+
+    # Kill any lingering sockd processes
+    pkill -9 sockd 2>/dev/null || true
+    pkill -9 danted 2>/dev/null || true
+
+    # Remove old config files
+    rm -f /etc/danted.conf /etc/sockd.conf /etc/dante/sockd.conf 2>/dev/null || true
+    rm -f /etc/danted.passwd /etc/sockd.passwd 2>/dev/null || true
+
+    # Clean up old result files
+    rm -f ./*_*_*.txt 2>/dev/null || true
+
+    log_info "旧配置已清除"
 }
 
 # ==================== Install Dependencies ==================
@@ -647,34 +668,37 @@ main() {
         exit 1
     fi
     
-    # 2. Detect OS
+    # 2. Clean up old config
+    cleanup_old
+    
+    # 3. Detect OS
     detect_os
     
-    # 3. Install dependencies
+    # 4. Install dependencies
     install_deps
     
-    # 4. Generate credentials
+    # 5. Generate credentials
     gen_creds
     
-    # 5. Detect network
+    # 6. Detect network
     detect_network
     
-    # 6. Configure Dante
+    # 7. Configure Dante
     config_dante
     
-    # 7. Configure firewall
+    # 8. Configure firewall
     config_firewall
     
-    # 8. Start service
+    # 9. Start service
     start_service
     
-    # 9. Detect IPs
+    # 10. Detect IPs
     detect_ips
     
-    # 10. Query ip-api.com
+    # 11. Query ip-api.com
     query_ipapi
     
-    # 11. Output results
+    # 12. Output results
     output_results
     
     echo ""
