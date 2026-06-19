@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# One-Click SOCKS5 Proxy Setup Script (Dante)
+# One-Click SOCKS5 Proxy Setup Script (sing-box)
 # Supports: Debian/Ubuntu, Alpine, CentOS/RHEL/Fedora
 # ============================================================
 set -e
@@ -10,7 +10,6 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
@@ -18,23 +17,23 @@ NC='\033[0m'
 SOCKS_USER=""
 SOCKS_PASS=""
 SOCKS_PORT=""
-MAIN_IF=""
-CONFIG_FILE=""
-SERVICE_NAME=""
-HAS_IPV6=false
 IPV4_ADDR=""
 IPV6_ADDR=""
 COUNTRY=""
 ASN=""
 ORG=""
 RESULT_FILE=""
+SINGBOX_BIN="/usr/local/bin/sing-box"
+CONFIG_DIR="/etc/sing-box"
+CONFIG_FILE="/etc/sing-box/config.json"
+SERVICE_NAME="sing-box"
 
 # ==================== Helper Functions ======================
 
 print_banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║     One-Click SOCKS5 Proxy (Dante)      ║"
+    echo "  ║     One-Click SOCKS5 Proxy (sing-box)   ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -56,7 +55,6 @@ gen_random_6() {
     local chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
     local result=""
     local len=${#chars}
-    # Use /dev/urandom with a deterministic approach that works across all Linux
     for i in {1..6}; do
         local idx
         idx=$(od -An -N2 -i /dev/urandom | awk '{print $1}')
@@ -71,7 +69,7 @@ gen_random_6() {
 
 detect_os() {
     log_info "检测操作系统..."
-    
+
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS_ID="$ID"
@@ -89,44 +87,33 @@ detect_os() {
         log_error "无法识别的操作系统"
         exit 1
     fi
-    
-    # Normalize OS ID
+
     case "$OS_ID" in
-        debian|ubuntu|raspbian)
-            PKG_MGR="apt-get"
-            PACKAGE_NAME="dante-server"
-            CONFIG_FILE="/etc/danted.conf"
-            SERVICE_NAME="danted"
-            PASSWD_FILE="/etc/danted.passwd"
-            ;;
-        alpine)
-            PKG_MGR="apk"
-            PACKAGE_NAME="dante-server"
-            CONFIG_FILE="/etc/dante/sockd.conf"
-            SERVICE_NAME="sockd"
-            PASSWD_FILE="/etc/danted.passwd"
-            ;;
+        debian|ubuntu|raspbian) PKG_MGR="apt-get" ;;
+        alpine) PKG_MGR="apk" ;;
         centos|rhel|fedora|rocky|almalinux|ol|amzn)
             PKG_MGR="yum"
-            PACKAGE_NAME="dante-server"
-            CONFIG_FILE="/etc/sockd.conf"
-            SERVICE_NAME="sockd"
-            PASSWD_FILE="/etc/sockd.passwd"
-            # Use dnf for newer systems
-            if command -v dnf &>/dev/null; then
-                PKG_MGR="dnf"
-            fi
+            command -v dnf &>/dev/null && PKG_MGR="dnf"
             ;;
-        *)
-            log_error "不支持的操作系统: $OS_ID"
-            exit 1
-            ;;
+        *) log_error "不支持的操作系统: $OS_ID"; exit 1 ;;
     esac
-    
+
     echo -e "  操作系统: ${CYAN}$OS_ID${NC} ${OS_VERSION}"
     echo -e "  包管理器: ${CYAN}$PKG_MGR${NC}"
-    echo -e "  服务名称: ${CYAN}$SERVICE_NAME${NC}"
-    echo -e "  配置文件: ${CYAN}$CONFIG_FILE${NC}"
+}
+
+# ==================== Detect Architecture ===================
+
+detect_arch() {
+    local arch
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64)  ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        armv7l)  ARCH="armv7" ;;
+        *) log_error "不支持的架构: $arch"; exit 1 ;;
+    esac
+    echo -e "  架构: ${CYAN}$ARCH${NC}"
 }
 
 # ==================== Cleanup Old Config =====================
@@ -134,31 +121,34 @@ detect_os() {
 cleanup_old() {
     log_info "清理旧脚本残留..."
 
-    # Stop and disable service (systemd)
+    # Stop old services
     if command -v systemctl &>/dev/null; then
+        systemctl stop sing-box 2>/dev/null || true
         systemctl stop danted 2>/dev/null || true
         systemctl stop sockd 2>/dev/null || true
-        systemctl disable danted 2>/dev/null || true
-        systemctl disable sockd 2>/dev/null || true
+        systemctl disable sing-box 2>/dev/null || true
     fi
 
-    # Stop service (OpenRC)
     if command -v rc-service &>/dev/null; then
+        rc-service sing-box stop 2>/dev/null || true
         rc-service sockd stop 2>/dev/null || true
-        rc-service danted stop 2>/dev/null || true
     fi
     if command -v rc-update &>/dev/null; then
+        rc-update del sing-box 2>/dev/null || true
         rc-update del sockd 2>/dev/null || true
-        rc-update del danted 2>/dev/null || true
     fi
 
-    # Kill any lingering sockd processes
+    # Kill lingering processes
+    pkill -9 sing-box 2>/dev/null || true
     pkill -9 sockd 2>/dev/null || true
     pkill -9 danted 2>/dev/null || true
 
-    # Remove old config files
+    # Remove old configs
+    rm -rf /etc/sing-box 2>/dev/null || true
     rm -f /etc/danted.conf /etc/sockd.conf /etc/dante/sockd.conf 2>/dev/null || true
     rm -f /etc/danted.passwd /etc/sockd.passwd 2>/dev/null || true
+    rm -f /etc/systemd/system/sing-box.service 2>/dev/null || true
+    rm -f /etc/init.d/sing-box 2>/dev/null || true
 
     # Clean up old result files
     rm -f ./*_*_*.txt 2>/dev/null || true
@@ -169,208 +159,130 @@ cleanup_old() {
 # ==================== Install Dependencies ==================
 
 install_deps() {
-    log_info "安装依赖..."
-    
+    log_info "安装依赖 (curl)..."
+
     case "$PKG_MGR" in
         apt-get)
             export DEBIAN_FRONTEND=noninteractive
-            # Ignore update errors from broken mirrors (continue anyway)
             apt-get update -qq 2>&1 || log_warn "部分源更新失败，继续安装..."
-            # Fix any interrupted dpkg state
             dpkg --configure -a 2>/dev/null || true
-            apt-get install -y -qq curl dante-server 2>&1 || {
-                # Retry with fix-broken
-                apt-get install -y -qq --fix-broken curl dante-server 2>&1 || {
-                    log_warn "apt 安装遇到问题，尝试修复..."
-                    apt-get install -y -f 2>&1 | tail -3
-                    apt-get install -y -qq curl dante-server 2>&1
-                }
-            } | tail -5
+            apt-get install -y -qq curl 2>&1 | tail -3
             ;;
         apk)
-            # Enable community repo if needed
-            if ! grep -q 'community' /etc/apk/repositories 2>/dev/null; then
-                echo "http://dl-cdn.alpinelinux.org/alpine/v$(cut -d'.' -f1,2 /etc/alpine-release)/community" >> /etc/apk/repositories
-            fi
-            apk update -q 2>&1 || log_warn "部分源更新失败，继续安装..."
-            apk add --no-cache curl dante-server 2>&1 | tail -5
+            apk add --no-cache curl 2>&1 | tail -3
             ;;
         yum|dnf)
-            # Install EPEL for CentOS/RHEL
-            if [[ "$OS_ID" =~ ^(centos|rhel|rocky|almalinux|ol)$ ]]; then
-                if ! rpm -q epel-release &>/dev/null; then
-                    $PKG_MGR install -y epel-release 2>&1 | tail -3 || true
-                fi
-            fi
-            $PKG_MGR install -y curl dante-server 2>&1 | tail -5 || {
-                log_warn "安装失败，尝试跳过缓存..."
-                $PKG_MGR install -y --skip-broken curl dante-server 2>&1 | tail -5
-            }
+            $PKG_MGR install -y curl 2>&1 | tail -3
             ;;
     esac
-    
-    # Verify dante-server installed
-    if ! command -v sockd &>/dev/null && ! command -v danted &>/dev/null; then
-        log_error "Dante 安装失败"
+
+    log_info "依赖安装完成"
+}
+
+# ==================== Download sing-box =====================
+
+install_singbox() {
+    log_info "下载并安装 sing-box..."
+
+    # Get latest version tag from GitHub API
+    local latest_version
+    latest_version=$(curl -s --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+    if [ -z "$latest_version" ]; then
+        latest_version="v1.10.7"
+        log_warn "无法获取最新版本，使用 $latest_version"
+    fi
+    echo -e "  版本: ${CYAN}${latest_version}${NC}"
+
+    # Download URL
+    local dl_url="https://github.com/SagerNet/sing-box/releases/download/${latest_version}/sing-box-${latest_version#v}-linux-${ARCH}.tar.gz"
+    if [ "$ARCH" = "armv7" ]; then
+        dl_url="https://github.com/SagerNet/sing-box/releases/download/${latest_version}/sing-box-${latest_version#v}-linux-armv7.tar.gz"
+    fi
+
+    echo -e "  下载: ${CYAN}$dl_url${NC}"
+
+    # Download and extract
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    curl -sSL --max-time 120 -o "$tmp_dir/sing-box.tar.gz" "$dl_url" || {
+        log_error "下载失败"
+        exit 1
+    }
+
+    tar -xzf "$tmp_dir/sing-box.tar.gz" -C "$tmp_dir"
+
+    # Find and install the binary
+    local extracted_bin
+    extracted_bin=$(find "$tmp_dir" -name "sing-box" -type f | head -1)
+    if [ -z "$extracted_bin" ]; then
+        extracted_bin=$(find "$tmp_dir" -name "sing-box*" -type f -executable | head -1)
+    fi
+    if [ -z "$extracted_bin" ]; then
+        log_error "未在压缩包中找到 sing-box 二进制文件"
         exit 1
     fi
-    
-    log_info "依赖安装完成"
+
+    install -m 755 "$extracted_bin" "$SINGBOX_BIN"
+    rm -rf "$tmp_dir"
+
+    log_info "sing-box 安装完成"
+    echo -e "  路径: ${CYAN}$SINGBOX_BIN${NC}"
 }
 
 # ==================== Generate Credentials ==================
 
 gen_creds() {
     log_info "生成随机凭证..."
-    
+
     SOCKS_USER=$(gen_random_6)
     SOCKS_PASS=$(gen_random_6)
     SOCKS_PORT=$(( RANDOM % 55536 + 10000 ))  # 10000-65535
-    
+
     echo -e "  用户名: ${CYAN}$SOCKS_USER${NC}"
     echo -e "  密码:   ${CYAN}$SOCKS_PASS${NC}"
     echo -e "  端口:   ${CYAN}$SOCKS_PORT${NC}"
 }
 
-# ==================== Network Detection =====================
+# ==================== Configure sing-box ====================
 
-detect_network() {
-    log_info "检测网络接口..."
-    
-    # Detect main network interface
-    MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
-    if [ -z "$MAIN_IF" ]; then
-        MAIN_IF=$(ip -o link show 2>/dev/null | grep -v "lo:" | awk -F': ' '{print $2}' | head -1)
-    fi
-    if [ -z "$MAIN_IF" ]; then
-        MAIN_IF="eth0"
-        log_warn "无法检测网卡，使用默认: eth0"
-    fi
-    
-    echo -e "  主网卡: ${CYAN}$MAIN_IF${NC}"
-    
-    # Check IPv6 availability
-    if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
-        HAS_IPV6=true
-        echo -e "  IPv6:   ${GREEN}可用${NC}"
-    else
-        HAS_IPV6=false
-        echo -e "  IPv6:   ${YELLOW}不可用${NC}"
-    fi
-}
+config_singbox() {
+    log_info "配置 sing-box..."
 
-# ==================== Configure Dante =======================
+    mkdir -p "$CONFIG_DIR"
 
-config_dante() {
-    log_info "配置 Dante..."
-    
-    # Create config directory for Alpine
-    if [ "$OS_ID" = "alpine" ]; then
-        mkdir -p /etc/dante
-    fi
-    
-    # Write Dante configuration
-    if [ "$HAS_IPV6" = true ]; then
-        cat > "$CONFIG_FILE" << EOF
-# Dante SOCKS5 Proxy Configuration
-# Generated by setup-socks5.sh
-
-logoutput: syslog
-
-internal: 0.0.0.0 port = $SOCKS_PORT
-internal: :: port = $SOCKS_PORT
-
-external: $MAIN_IF
-
-socksmethod: username
-user.socks5pw: ${PASSWD_FILE}
-user.privileged: root
-user.notprivileged: nobody
-
-client pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: error
-}
-
-client pass {
-    from: ::/0 to: ::/0
-    log: error
-}
-
-socks pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: error
-    socksmethod: username
-}
-
-socks pass {
-    from: ::/0 to: ::/0
-    log: error
-    socksmethod: username
+    cat > "$CONFIG_FILE" << EOF
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "0.0.0.0",
+      "listen_port": ${SOCKS_PORT},
+      "users": [
+        {
+          "username": "${SOCKS_USER}",
+          "password": "${SOCKS_PASS}"
+        }
+      ]
+    }
+  ]
 }
 EOF
-    else
-        cat > "$CONFIG_FILE" << EOF
-# Dante SOCKS5 Proxy Configuration
-# Generated by setup-socks5.sh
 
-logoutput: syslog
-
-internal: 0.0.0.0 port = $SOCKS_PORT
-external: $MAIN_IF
-
-socksmethod: username
-user.socks5pw: ${PASSWD_FILE}
-user.privileged: root
-user.notprivileged: nobody
-
-client pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: error
-}
-
-socks pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: error
-    socksmethod: username
-}
-EOF
-    fi
-    
     chmod 644 "$CONFIG_FILE"
-    
-    # Create passwd file
-    echo "${SOCKS_USER}:${SOCKS_PASS}" > "$PASSWD_FILE"
-    chmod 600 "$PASSWD_FILE"
-    
-    log_info "Dante 配置完成"
+    log_info "sing-box 配置完成"
     echo -e "  配置: ${CYAN}$CONFIG_FILE${NC}"
-    echo -e "  密码文件: ${CYAN}$PASSWD_FILE${NC}"
 }
 
 # ==================== Configure Firewall ====================
 
 config_firewall() {
     log_info "配置防火墙..."
-    
-    # UFW
-    if command -v ufw &>/dev/null; then
-        if ufw status | grep -q "Status: active"; then
-            ufw allow "$SOCKS_PORT"/tcp &>/dev/null || true
-            echo -e "  UFW: ${GREEN}已开放 $SOCKS_PORT/tcp${NC}"
-        else
-            echo -e "  UFW: ${YELLOW}未启用，跳过${NC}"
-        fi
-    fi
-    
-    # firewalld
-    if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-        firewall-cmd --permanent --add-port="$SOCKS_PORT"/tcp &>/dev/null || true
-        firewall-cmd --reload &>/dev/null || true
-        echo -e "  firewalld: ${GREEN}已开放 $SOCKS_PORT/tcp${NC}"
-    fi
-    
-    # iptables (fallback for any system)
+
+    # iptables (works everywhere)
     if command -v iptables &>/dev/null; then
         if ! iptables -L INPUT -n 2>/dev/null | grep -q "$SOCKS_PORT"; then
             iptables -I INPUT -p tcp --dport "$SOCKS_PORT" -j ACCEPT 2>/dev/null || true
@@ -379,57 +291,44 @@ config_firewall() {
             echo -e "  iptables: ${GREEN}规则已存在${NC}"
         fi
     fi
+
+    # UFW
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow "$SOCKS_PORT"/tcp &>/dev/null || true
+        echo -e "  UFW: ${GREEN}已开放 $SOCKS_PORT/tcp${NC}"
+    fi
+
+    # firewalld
+    if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+        firewall-cmd --permanent --add-port="$SOCKS_PORT"/tcp &>/dev/null || true
+        firewall-cmd --reload &>/dev/null || true
+        echo -e "  firewalld: ${GREEN}已开放 $SOCKS_PORT/tcp${NC}"
+    fi
 }
 
 # ==================== Start Service =========================
 
 start_service() {
-    log_info "启动 Dante 服务..."
-    
-    # Determine the sockd binary path
-    local SOCKD_BIN=""
-    if command -v sockd &>/dev/null; then
-        SOCKD_BIN="sockd"
-    elif command -v danted &>/dev/null; then
-        SOCKD_BIN="danted"
-    else
-        log_error "找不到 sockd 或 danted 二进制文件"
-        exit 1
-    fi
-    
-    # Kill any existing instances cleanly
-    pkill -9 sockd 2>/dev/null || true
-    pkill -9 danted 2>/dev/null || true
-    sleep 1
-    
-    # Stop systemd service if it exists
-    if command -v systemctl &>/dev/null; then
-        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-        systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-    fi
-    
-    # Stop OpenRC service if it exists
-    if command -v rc-service &>/dev/null; then
-        rc-service "$SERVICE_NAME" stop 2>/dev/null || true
-    fi
-    if command -v rc-update &>/dev/null; then
-        rc-update del "$SERVICE_NAME" 2>/dev/null || true
-    fi
-    
-    # Create systemd service - relies on user.socks5pw in config, no -p flag
+    log_info "启动 sing-box 服务..."
+
+    # Create systemd service
     if command -v systemctl &>/dev/null; then
         mkdir -p /etc/systemd/system
         cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
-Description=Dante SOCKS5 Proxy
-After=network.target
+Description=sing-box SOCKS5 Proxy
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
 
 [Service]
 Type=simple
-ExecStart=${SOCKD_BIN} -f ${CONFIG_FILE}
+User=root
+ExecStart=${SINGBOX_BIN} run -c ${CONFIG_FILE}
 Restart=always
 RestartSec=5
-LimitNOFILE=65535
+LimitNOFILE=infinity
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -437,24 +336,24 @@ EOF
         systemctl daemon-reload
         systemctl enable "$SERVICE_NAME"
         systemctl start "$SERVICE_NAME"
-        
+
         sleep 2
         if systemctl is-active --quiet "$SERVICE_NAME"; then
             echo -e "  状态: ${GREEN}运行中 (systemd)${NC}"
         else
             log_warn "systemd 启动失败，尝试直接启动..."
-            $SOCKD_BIN -f "$CONFIG_FILE" -D &
+            nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" > /dev/null 2>&1 &
             sleep 2
             echo -e "  状态: ${YELLOW}已手动启动${NC}"
         fi
+
     # OpenRC (Alpine)
     elif command -v rc-update &>/dev/null; then
-        # Create OpenRC init script
         cat > /etc/init.d/${SERVICE_NAME} << EOF
 #!/sbin/openrc-run
-name="Dante SOCKS5 Proxy"
-command="${SOCKD_BIN}"
-command_args="-f ${CONFIG_FILE} -D"
+name="sing-box SOCKS5 Proxy"
+command="${SINGBOX_BIN}"
+command_args="run -c ${CONFIG_FILE}"
 command_background=true
 pidfile="/var/run/${SERVICE_NAME}.pid"
 depend() {
@@ -464,29 +363,29 @@ EOF
         chmod +x /etc/init.d/${SERVICE_NAME}
         rc-update add "$SERVICE_NAME" default
         rc-service "$SERVICE_NAME" start
-        
+
         sleep 2
         if rc-service "$SERVICE_NAME" status 2>/dev/null | grep -q "started"; then
             echo -e "  状态: ${GREEN}运行中 (OpenRC)${NC}"
         else
             log_warn "OpenRC 启动失败，尝试直接启动..."
-            $SOCKD_BIN -f "$CONFIG_FILE" -D &
+            nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" > /dev/null 2>&1 &
             sleep 2
             echo -e "  状态: ${YELLOW}已手动启动${NC}"
         fi
     else
         # Direct start
-        $SOCKD_BIN -f "$CONFIG_FILE" -D &
+        nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" > /dev/null 2>&1 &
         sleep 2
         echo -e "  状态: ${YELLOW}已直接启动${NC}"
     fi
-    
+
     # Verify port is listening
     sleep 1
     if ss -tlnp 2>/dev/null | grep -q ":$SOCKS_PORT " || netstat -tlnp 2>/dev/null | grep -q ":$SOCKS_PORT "; then
         echo -e "  端口: ${GREEN}$SOCKS_PORT 正在监听${NC}"
     else
-        log_warn "端口 $SOCKS_PORT 未检测到监听，请检查 Dante 日志"
+        log_warn "端口 $SOCKS_PORT 未检测到监听"
         log_info "排查命令: journalctl -u ${SERVICE_NAME} --no-pager -n 20"
     fi
 }
@@ -502,7 +401,7 @@ get_ipv4() {
         "https://api.ipify.org"
         "https://checkip.amazonaws.com"
     )
-    
+
     for src in "${sources[@]}"; do
         ip=$(curl -4 -s --max-time 8 "$src" 2>/dev/null)
         if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -510,14 +409,9 @@ get_ipv4() {
             return 0
         fi
     done
-    
-    # Fallback: try to detect from ip command
+
     ip=$(ip -4 addr show scope global 2>/dev/null | grep -oE 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | grep -v '^10\.\|^172\.1[6-9]\|^172\.2[0-9]\|^172\.3[0-1]\|^192\.168\.\|^127\.' | head -1)
-    if [[ -n "$ip" ]]; then
-        echo "$ip"
-        return 0
-    fi
-    
+    [[ -n "$ip" ]] && echo "$ip" && return 0
     return 1
 }
 
@@ -529,7 +423,7 @@ get_ipv6() {
         "https://icanhazip.com"
         "https://api6.ipify.org"
     )
-    
+
     for src in "${sources[@]}"; do
         ip=$(curl -6 -s --max-time 8 "$src" 2>/dev/null)
         if [[ -n "$ip" && "$ip" =~ : ]]; then
@@ -537,20 +431,15 @@ get_ipv6() {
             return 0
         fi
     done
-    
-    # Fallback: try to detect from ip command (non-link-local, non-ULA global address)
+
     ip=$(ip -6 addr show scope global 2>/dev/null | grep -oE 'inet6 [0-9a-fA-F:]+' | awk '{print $2}' | grep -v '^fe80:' | head -1)
-    if [[ -n "$ip" ]]; then
-        echo "$ip"
-        return 0
-    fi
-    
+    [[ -n "$ip" ]] && echo "$ip" && return 0
     return 1
 }
 
 detect_ips() {
     log_info "检测公网 IP 地址..."
-    
+
     echo -n "  IPv4: "
     IPV4_ADDR=$(get_ipv4 || true)
     if [ -n "$IPV4_ADDR" ]; then
@@ -558,7 +447,7 @@ detect_ips() {
     else
         echo -e "${RED}未检测到${NC}"
     fi
-    
+
     echo -n "  IPv6: "
     IPV6_ADDR=$(get_ipv6 || true)
     if [ -n "$IPV6_ADDR" ]; then
@@ -566,8 +455,7 @@ detect_ips() {
     else
         echo -e "${YELLOW}未检测到${NC}"
     fi
-    
-    # If neither IPv4 nor IPv6 found, error
+
     if [ -z "$IPV4_ADDR" ] && [ -z "$IPV6_ADDR" ]; then
         log_error "未检测到任何公网 IP 地址"
         exit 1
@@ -578,47 +466,38 @@ detect_ips() {
 
 query_ipapi() {
     local query_ip
-    
-    # Prefer IPv4 for geo-location query
+
     if [ -n "$IPV4_ADDR" ]; then
         query_ip="$IPV4_ADDR"
     elif [ -n "$IPV6_ADDR" ]; then
         query_ip="$IPV6_ADDR"
     else
-        log_warn "没有 IP 地址可用于查询 ip-api.com"
-        COUNTRY="Unknown"
-        ASN="Unknown"
-        ORG="Unknown"
+        COUNTRY="Unknown"; ASN="Unknown"; ORG="Unknown"
         return
     fi
-    
+
     log_info "查询 ip-api.com 信息..."
     echo -ne "  查询 IP: ${CYAN}$query_ip${NC} ... "
-    
+
     local data
     data=$(curl -s --max-time 10 "http://ip-api.com/json/${query_ip}?fields=country,as,org" 2>/dev/null)
-    
+
     if [ -z "$data" ]; then
         echo -e "${RED}失败${NC}"
-        log_warn "ip-api.com 查询失败，使用默认命名"
-        COUNTRY="Unknown"
-        ASN="Unknown"
-        ORG="Unknown"
+        COUNTRY="Unknown"; ASN="Unknown"; ORG="Unknown"
         return
     fi
-    
+
     echo -e "${GREEN}成功${NC}"
-    
-    # Parse JSON with grep/sed (no jq dependency)
+
     COUNTRY=$(echo "$data" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p')
     ASN=$(echo "$data" | sed -n 's/.*"as":"\([^"]*\)".*/\1/p')
     ORG=$(echo "$data" | sed -n 's/.*"org":"\([^"]*\)".*/\1/p')
-    
-    # Cleanup: replace spaces with underscores, remove special chars unsafe for filename
+
     COUNTRY="${COUNTRY:-Unknown}"
     ASN="${ASN:-Unknown}"
     ORG="${ORG:-Unknown}"
-    
+
     echo -e "  国家: ${CYAN}$COUNTRY${NC}"
     echo -e "  ASN:  ${CYAN}$ASN${NC}"
     echo -e "  组织: ${CYAN}$ORG${NC}"
@@ -627,30 +506,27 @@ query_ipapi() {
 # ==================== Output Results ========================
 
 sanitize_filename() {
-    local str="$1"
-    # Replace spaces with underscores, remove characters unsafe for filenames
-    echo "$str" | sed 's/ /_/g' | tr -cd '[:alnum:]_.-'
+    echo "$1" | sed 's/ /_/g' | tr -cd '[:alnum:]_.-'
 }
 
 output_results() {
     local country_safe asn_safe org_safe
-    
+
     country_safe=$(sanitize_filename "$COUNTRY")
     asn_safe=$(sanitize_filename "$ASN")
     org_safe=$(sanitize_filename "$ORG")
-    
+
     RESULT_FILE="${country_safe}_${asn_safe}_${org_safe}.txt"
-    
+
     echo ""
     echo -e "${CYAN}========================================${NC}"
     echo -e "${CYAN}${BOLD}    SOCKS5 代理搭建完成！${NC}"
     echo -e "${CYAN}========================================${NC}"
     echo ""
-    
-    # Build the result content
+
     local result_content=""
     result_content+="========================================\n"
-    result_content+="  SOCKS5 Proxy Setup Complete\n"
+    result_content+="  SOCKS5 Proxy Setup Complete (sing-box)\n"
     result_content+="========================================\n"
     result_content+="Server Info: ${COUNTRY} | ${ASN} | ${ORG}\n"
     result_content+="========================================\n\n"
@@ -658,12 +534,12 @@ output_results() {
     result_content+="  Username: ${SOCKS_USER}\n"
     result_content+="  Password: ${SOCKS_PASS}\n"
     result_content+="  Port:     ${SOCKS_PORT}\n\n"
-    
+
     # Output IPv4
     if [ -n "$IPV4_ADDR" ]; then
         local url_v4="socks5://${SOCKS_USER}:${SOCKS_PASS}@${IPV4_ADDR}:${SOCKS_PORT}"
         local v2ray_v4="socks://${SOCKS_USER}:${SOCKS_PASS}@${IPV4_ADDR}:${SOCKS_PORT}#${country_safe}_${asn_safe}_${org_safe}_IPv4"
-        
+
         echo -e "${GREEN}━━━ IPv4 ━━━${NC}"
         echo -e "  ${BOLD}代理地址:${NC}"
         echo -e "  ${CYAN}${url_v4}${NC}"
@@ -671,17 +547,17 @@ output_results() {
         echo -e "  ${BOLD}v2rayN 导入格式:${NC}"
         echo -e "  ${CYAN}${v2ray_v4}${NC}"
         echo ""
-        
+
         result_content+="[IPv4]\n"
         result_content+="  Proxy URL:  ${url_v4}\n"
         result_content+="  v2rayN:     ${v2ray_v4}\n\n"
     fi
-    
+
     # Output IPv6
     if [ -n "$IPV6_ADDR" ]; then
         local url_v6="socks5://${SOCKS_USER}:${SOCKS_PASS}@[${IPV6_ADDR}]:${SOCKS_PORT}"
         local v2ray_v6="socks://${SOCKS_USER}:${SOCKS_PASS}@[${IPV6_ADDR}]:${SOCKS_PORT}#${country_safe}_${asn_safe}_${org_safe}_IPv6"
-        
+
         echo -e "${GREEN}━━━ IPv6 ━━━${NC}"
         echo -e "  ${BOLD}代理地址:${NC}"
         echo -e "  ${CYAN}${url_v6}${NC}"
@@ -689,23 +565,20 @@ output_results() {
         echo -e "  ${BOLD}v2rayN 导入格式:${NC}"
         echo -e "  ${CYAN}${v2ray_v6}${NC}"
         echo ""
-        
+
         result_content+="[IPv6]\n"
         result_content+="  Proxy URL:  ${url_v6}\n"
         result_content+="  v2rayN:     ${v2ray_v6}\n\n"
     fi
-    
+
     result_content+="========================================\n"
-    result_content+="Generated by setup-socks5.sh\n"
+    result_content+="Generated by socks5.sh (sing-box)\n"
     result_content+="========================================\n"
-    
-    # Save to file
+
     echo -e "$result_content" > "$RESULT_FILE"
     echo -e "${CYAN}========================================${NC}"
     echo -e "${BOLD}信息已保存到:${NC} ${GREEN}$RESULT_FILE${NC}"
     echo ""
-    
-    # Also print the content that was saved
     echo -e "${BOLD}文件内容:${NC}"
     echo -e "$result_content"
 }
@@ -714,50 +587,52 @@ output_results() {
 
 main() {
     print_banner
-    
+
     # 1. Check root
     if [ "$EUID" -ne 0 ]; then
         log_error "请使用 root 权限运行此脚本"
-        log_info "用法: sudo bash setup-socks5.sh"
+        log_info "用法: sudo bash socks5.sh"
         exit 1
     fi
-    
+
     # 2. Clean up old config
     cleanup_old
-    
+
     # 3. Detect OS
     detect_os
-    
-    # 4. Install dependencies
+
+    # 4. Detect architecture
+    detect_arch
+
+    # 5. Install dependencies (curl)
     install_deps
-    
-    # 5. Generate credentials
+
+    # 6. Download and install sing-box
+    install_singbox
+
+    # 7. Generate credentials
     gen_creds
-    
-    # 6. Detect network
-    detect_network
-    
-    # 7. Configure Dante
-    config_dante
-    
-    # 8. Configure firewall
+
+    # 8. Configure sing-box
+    config_singbox
+
+    # 9. Configure firewall
     config_firewall
-    
-    # 9. Start service
+
+    # 10. Start service
     start_service
-    
-    # 10. Detect IPs
+
+    # 11. Detect IPs
     detect_ips
-    
-    # 11. Query ip-api.com
+
+    # 12. Query ip-api.com
     query_ipapi
-    
-    # 12. Output results
+
+    # 13. Output results
     output_results
-    
+
     echo ""
-    log_info "全部完成！SOCKS5 代理已就绪。"
+    log_info "全部完成！SOCKS5 代理已就绪 (sing-box)。"
 }
 
-# Run main
 main "$@"
