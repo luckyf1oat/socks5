@@ -137,25 +137,38 @@ install_deps() {
     case "$PKG_MGR" in
         apt-get)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq
-            apt-get install -y -qq curl dante-server 2>&1 | tail -5
+            # Ignore update errors from broken mirrors (continue anyway)
+            apt-get update -qq 2>&1 || log_warn "部分源更新失败，继续安装..."
+            # Fix any interrupted dpkg state
+            dpkg --configure -a 2>/dev/null || true
+            apt-get install -y -qq curl dante-server 2>&1 || {
+                # Retry with fix-broken
+                apt-get install -y -qq --fix-broken curl dante-server 2>&1 || {
+                    log_warn "apt 安装遇到问题，尝试修复..."
+                    apt-get install -y -f 2>&1 | tail -3
+                    apt-get install -y -qq curl dante-server 2>&1
+                }
+            } | tail -5
             ;;
         apk)
             # Enable community repo if needed
             if ! grep -q 'community' /etc/apk/repositories 2>/dev/null; then
                 echo "http://dl-cdn.alpinelinux.org/alpine/v$(cut -d'.' -f1,2 /etc/alpine-release)/community" >> /etc/apk/repositories
             fi
-            apk update -q
+            apk update -q 2>&1 || log_warn "部分源更新失败，继续安装..."
             apk add --no-cache curl dante-server 2>&1 | tail -5
             ;;
         yum|dnf)
             # Install EPEL for CentOS/RHEL
             if [[ "$OS_ID" =~ ^(centos|rhel|rocky|almalinux|ol)$ ]]; then
                 if ! rpm -q epel-release &>/dev/null; then
-                    $PKG_MGR install -y epel-release 2>&1 | tail -3
+                    $PKG_MGR install -y epel-release 2>&1 | tail -3 || true
                 fi
             fi
-            $PKG_MGR install -y curl dante-server 2>&1 | tail -5
+            $PKG_MGR install -y curl dante-server 2>&1 | tail -5 || {
+                log_warn "安装失败，尝试跳过缓存..."
+                $PKG_MGR install -y --skip-broken curl dante-server 2>&1 | tail -5
+            }
             ;;
     esac
     
