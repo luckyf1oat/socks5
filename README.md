@@ -27,11 +27,11 @@
 
 ```bash
 # 使用 curl（推荐）
-curl -sSL https://raw.githubusercontent.com/<user>/<repo>/main/setup-socks5.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/luckyf1oat/socks5/main/socks5.sh | sudo bash
 
 # 或本地运行
-chmod +x setup-socks5.sh
-sudo ./setup-socks5.sh
+chmod +x socks5.sh
+sudo ./socks5.sh
 ```
 
 ## 输出示例
