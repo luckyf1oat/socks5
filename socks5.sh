@@ -51,10 +51,9 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Generate random string: 6 chars (A-Z, a-z, 0-9, symbols)
-# Excludes @ : / ? # [ ] characters that break URLs
+# Generate random string: 6 chars (A-Z, a-z, 0-9)
 gen_random_6() {
-    local chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!$%^&*_-+='
+    local chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
     local result=""
     local len=${#chars}
     # Use /dev/urandom with a deterministic approach that works across all Linux
@@ -284,6 +283,7 @@ internal: :: port = $SOCKS_PORT
 external: $MAIN_IF
 
 socksmethod: username
+user.socks5pw: ${PASSWD_FILE}
 user.privileged: root
 user.notprivileged: nobody
 
@@ -320,6 +320,7 @@ internal: 0.0.0.0 port = $SOCKS_PORT
 external: $MAIN_IF
 
 socksmethod: username
+user.socks5pw: ${PASSWD_FILE}
 user.privileged: root
 user.notprivileged: nobody
 
@@ -424,10 +425,10 @@ Description=Dante SOCKS5 Proxy
 After=network.target
 
 [Service]
-Type=forking
+Type=simple
 ExecStart=${SOCKD_BIN} -f ${CONFIG_FILE} -p ${PASSWD_FILE}
-PIDFile=/var/run/sockd.pid
 Restart=always
+RestartSec=5
 LimitNOFILE=65535
 
 [Install]
