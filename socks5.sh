@@ -416,7 +416,7 @@ start_service() {
         rc-update del "$SERVICE_NAME" 2>/dev/null || true
     fi
     
-    # Create systemd service file with proper -p flag for password auth
+    # Create systemd service - relies on user.socks5pw in config, no -p flag
     if command -v systemctl &>/dev/null; then
         mkdir -p /etc/systemd/system
         cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
@@ -426,7 +426,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${SOCKD_BIN} -f ${CONFIG_FILE} -p ${PASSWD_FILE}
+ExecStart=${SOCKD_BIN} -f ${CONFIG_FILE}
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -443,7 +443,7 @@ EOF
             echo -e "  状态: ${GREEN}运行中 (systemd)${NC}"
         else
             log_warn "systemd 启动失败，尝试直接启动..."
-            $SOCKD_BIN -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
+            $SOCKD_BIN -f "$CONFIG_FILE" -D &
             sleep 2
             echo -e "  状态: ${YELLOW}已手动启动${NC}"
         fi
@@ -454,7 +454,7 @@ EOF
 #!/sbin/openrc-run
 name="Dante SOCKS5 Proxy"
 command="${SOCKD_BIN}"
-command_args="-f ${CONFIG_FILE} -p ${PASSWD_FILE} -D"
+command_args="-f ${CONFIG_FILE} -D"
 command_background=true
 pidfile="/var/run/${SERVICE_NAME}.pid"
 depend() {
@@ -470,13 +470,13 @@ EOF
             echo -e "  状态: ${GREEN}运行中 (OpenRC)${NC}"
         else
             log_warn "OpenRC 启动失败，尝试直接启动..."
-            $SOCKD_BIN -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
+            $SOCKD_BIN -f "$CONFIG_FILE" -D &
             sleep 2
             echo -e "  状态: ${YELLOW}已手动启动${NC}"
         fi
     else
         # Direct start
-        $SOCKD_BIN -f "$CONFIG_FILE" -p "$PASSWD_FILE" -D &
+        $SOCKD_BIN -f "$CONFIG_FILE" -D &
         sleep 2
         echo -e "  状态: ${YELLOW}已直接启动${NC}"
     fi
